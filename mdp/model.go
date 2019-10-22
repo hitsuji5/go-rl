@@ -8,20 +8,22 @@ type Model struct {
 	transitions []Transition
 }
 
+// NumStates returns a number of states in MDP.
 func (m *Model) NumStates() int {
 	return len(m.states)
 }
 
+// NumActions returns a number of actions in MDP.
 func (m *Model) NumActions() int {
 	return len(m.actions)
 }
 
-func (m *Model) SetReward(idx int, r float64) bool {
-	if idx >= len(m.actions) || m.actions[idx].transition == nil {
-		return false
+// UpdateReward update the reward of all actions.
+func (m *Model) UpdateReward(reward func(a *Action) float64) {
+	for i := range m.actions {
+		if m.actions[i].transition == nil { continue }
+		m.actions[i].transition.r = reward(&m.actions[i])
 	}
-	m.actions[idx].transition.r = r
-	return true
 }
 
 // State represents a state of Model.
@@ -32,6 +34,7 @@ type State struct {
 	transitions []*Transition
 }
 
+// Index returns the array index of the state.
 func (s *State) Index() int {
 	return s.idx
 }
@@ -43,6 +46,7 @@ type Action struct {
 	transition *Transition
 }
 
+// Index returns the array index of the action.
 func (a *Action) Index() int {
 	return a.idx
 }
@@ -106,8 +110,8 @@ func NewModel(stateNames []int, stateTransitions []StateTransition) *Model {
 	return m
 }
 
-// Action returns the action satisfied with a given state transition.
-func (m *Model) Action(fromStateID, toStateID int) (a *Action, ok bool) {
+// ActionByID returns the action satisfied with a given state transition.
+func (m *Model) ActionByID(fromStateID, toStateID int) (a *Action, ok bool) {
 	fromState, ok := m.StateOf[fromStateID]
 	if !ok { return }
 	toState, ok := m.StateOf[toStateID]

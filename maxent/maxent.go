@@ -31,7 +31,7 @@ func NewDemonstration(m *mdp.Model, goalState int, trajectories [][]int) *Demons
 		initialStateDist[state.Index()]++
 		fromState := tr[0]
 		for _, toState := range tr[1:] {
-			acition, ok := m.Action(fromState, toState)
+			acition, ok := m.ActionByID(fromState, toState)
 			if ok { actionDist[acition.Index()]++ }
 			fromState = toState
 		}
@@ -133,9 +133,13 @@ func EponentiatedGradientAscent(theta, grad []float64, gamma float64) {
 }
 
 func UpdateCost(m *mdp.Model, features [][]float64, theta []float64) {
-	for i := 0; i < m.NumActions(); i++ {
-		m.SetReward(i, -base.Vector(theta).Dot(base.Vector(features[i])))
-	}
+	m.UpdateReward(
+		func(a *mdp.Action) float64 {
+			return -base.Vector(theta).Dot(base.Vector(features[a.Index()]))
+	})
+	// for i := 0; i < m.NumActions(); i++ {
+	// 	m.SetReward(i, -base.Vector(theta).Dot(base.Vector(features[i])))
+	// }
 }
 
 func (t *Trainer) ComputeFeatureExpectationDifference(vi *mdp.ValueIterator, demo *Demonstration) []float64 {
