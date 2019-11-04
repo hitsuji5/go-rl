@@ -24,11 +24,16 @@ func (a Vector) Mul(b Vector) {
 	}
 }
 
-func (a Vector) Normalize() {
+func (a Vector) Sum() float64 {
 	z := 0.0
 	for _, x := range a {
 		z += x
 	}
+	return z
+}
+
+func (a Vector) Normalize() {
+	z := a.Sum()
 	for i := range a {
 		a[i] /= z
 	}

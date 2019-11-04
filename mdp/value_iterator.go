@@ -42,7 +42,7 @@ func NewValueIterator(model *Model) *ValueIterator {
 func (vi *ValueIterator) SetAbsorbingState(stateID int) bool {
 	state, ok := vi.model.StateOf[stateID]
 	if !ok { return false }
-	vi.isAbsorbing[state.idx] = true
+	vi.isAbsorbing[state.index] = true
 	return true
 }
 
@@ -69,7 +69,7 @@ func (vi *ValueIterator) Init() {
 
 // ToActions returns an action space of a given state as []*Action.
 func (vi *ValueIterator) ToActions(s *State) []*Action {
-	if vi.isAbsorbing[s.idx] {
+	if vi.isAbsorbing[s.index] {
 		return s.actions[:0]
 	}
 	return s.actions
@@ -96,7 +96,7 @@ func (vi *ValueIterator) RunValueIteration() {
 				s := tr.action.state
 				td = vi.bellmanBackup(s)
 				if td > tdThreshold && pq.Size() < pqSize {
-					pq.Push(s.idx, td)
+					pq.Push(s.index, td)
 				}
 			}
 		}
@@ -116,18 +116,18 @@ func (vi *ValueIterator) UpdatePolicy() {
 
 		if vi.alpha == 0 {
 			for _, a := range actions {
-				vi.Policy[a.idx] = 0
+				vi.Policy[a.index] = 0
 			}
-			vi.Policy[bestAction.idx] = 1
+			vi.Policy[bestAction.index] = 1
 		} else {
-			maxQ := vi.Q[bestAction.idx]
+			maxQ := vi.Q[bestAction.index]
 			z := 0.0
 			for _, a := range actions {
-				vi.Policy[a.idx] = math.Exp((vi.Q[a.idx] - maxQ) / vi.alpha)
-				z += vi.Policy[a.idx]
+				vi.Policy[a.index] = math.Exp((vi.Q[a.index] - maxQ) / vi.alpha)
+				z += vi.Policy[a.index]
 			}
 			for _, a := range s.actions {
-				vi.Policy[a.idx] /= z
+				vi.Policy[a.index] /= z
 			}
 		}
 	}
@@ -138,11 +138,11 @@ func (vi *ValueIterator) bellmanBackup(s *State) (tdError float64) {
 	actions := vi.ToActions(s)
 	if len(actions) == 0 { return }
 	for _, a := range actions {
-		vi.Q[a.idx] = a.transition.r + vi.V[a.transition.state.idx]
+		vi.Q[a.index] = a.transition.r + vi.V[a.transition.state.index]
 	}
 	v := vi.softMax(s.actions)
-	tdError = math.Abs(v - vi.V[s.idx])	
-	vi.V[s.idx] = v
+	tdError = math.Abs(v - vi.V[s.index])	
+	vi.V[s.index] = v
 	return
 }
 
@@ -150,10 +150,10 @@ func (vi *ValueIterator) softMax(actions []*Action) float64 {
 	if len(actions) == 0 {
 		panic("model: zero slice length")
 	}
-	maxQ := vi.Q[actions[0].idx]
+	maxQ := vi.Q[actions[0].index]
 	for _, a := range actions[1:] {
-		if maxQ < vi.Q[a.idx] {
-			maxQ = vi.Q[a.idx]
+		if maxQ < vi.Q[a.index] {
+			maxQ = vi.Q[a.index]
 		}
 	}
 	if vi.alpha == 0 {
@@ -161,7 +161,7 @@ func (vi *ValueIterator) softMax(actions []*Action) float64 {
 	}	
 	var lse float64
 	for _, a := range actions {
-		lse += math.Exp((vi.Q[a.idx] - maxQ) / vi.alpha)
+		lse += math.Exp((vi.Q[a.index] - maxQ) / vi.alpha)
 	}
 	return vi.alpha * math.Log(lse) + maxQ
 }
@@ -171,11 +171,11 @@ func (vi *ValueIterator) bestAction(actions []*Action) *Action {
 		panic("model: zero slice length")
 	}
 	maxA := actions[0]
-	maxQ := vi.Q[maxA.idx]
+	maxQ := vi.Q[maxA.index]
 	for _, a := range actions {
-		if maxQ < vi.Q[a.idx] {
+		if maxQ < vi.Q[a.index] {
 			maxA = a
-			maxQ = vi.Q[a.idx]
+			maxQ = vi.Q[a.index]
 		}
 	}
 	return maxA
@@ -188,7 +188,7 @@ func (vi *ValueIterator) sampleAction(actions []*Action) *Action {
 	cumP := 0.0
 	r := rand.Float64()
 	for _, a := range actions[:len(actions)-1] {
-		cumP += vi.Policy[a.idx]
+		cumP += vi.Policy[a.index]
 		if r < cumP {
 			return a
 		}
@@ -204,12 +204,15 @@ func (vi *ValueIterator) GenerateTrajectory(startID, goalID, maxSteps int) (tr [
 	goalState, ok := m.StateOf[goalID]
 	if !ok { return }
 	s := startState
-	tr = append(tr, s.name)
+	tr = append(tr, s.id)
 	for i := 0; i < maxSteps; i++ {
 		actions := vi.ToActions(s)
-		if len(s.actions) == 0 { return }
+		if len(s.actions) == 0 {
+			ok = false
+			return
+		}
 		s = vi.sampleAction(actions).transition.state
-		tr = append(tr, s.name)
+		tr = append(tr, s.id)
 		if s == goalState {
 			ok = true
 			return
@@ -223,8 +226,8 @@ func (vi *ValueIterator) GenerateTrajectory(startID, goalID, maxSteps int) (tr [
 func (vi *ValueIterator) computeStateDist(s *State, actionDist []float64) float64 {
 	d := 0.0
 	for _, tr := range s.transitions {
-		if vi.isAbsorbing[tr.action.state.idx] { continue }
-		d += actionDist[tr.action.idx]
+		if vi.isAbsorbing[tr.action.state.index] { continue }
+		d += actionDist[tr.action.index]
 	}
 	return d
 }
@@ -253,9 +256,9 @@ func (vi *ValueIterator) StateActionVisitation(initialStateDist []float64) ([]fl
 				actions := vi.ToActions(s)
 				if len(actions) == 0 || stateDist[stateIdx] < sdThreshold { continue }
 				for _, a := range actions {
-					actionDist[a.idx] = stateDist[stateIdx] * vi.Policy[a.idx]
+					actionDist[a.index] = stateDist[stateIdx] * vi.Policy[a.index]
 					nextState := a.transition.state
-					idx := nextState.idx
+					idx := nextState.index
 					sd = stateDist[idx]
 					stateDist[idx] = initialStateDist[idx] + vi.computeStateDist(nextState, actionDist)
 					sd = math.Abs(sd - stateDist[idx])
@@ -272,9 +275,9 @@ func (vi *ValueIterator) StateActionVisitation(initialStateDist []float64) ([]fl
 			actions := vi.ToActions(s)
 			if len(actions) == 0 || stateDist[stateIdx] < sdThreshold { continue }
 			for _, a := range actions {
-				actionDist[a.idx] = stateDist[stateIdx] * vi.Policy[a.idx]
+				actionDist[a.index] = stateDist[stateIdx] * vi.Policy[a.index]
 				nextState := a.transition.state
-				idx := nextState.idx
+				idx := nextState.index
 				sd = stateDist[idx]
 				stateDist[idx] = initialStateDist[idx] + vi.computeStateDist(nextState, actionDist)
 				sd = math.Abs(sd - stateDist[idx])

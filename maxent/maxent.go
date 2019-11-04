@@ -1,7 +1,6 @@
 package maxent
 
 import (
-	// "fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -14,142 +13,184 @@ const (
 	gradDecay = 0.99
 )
 
-type Demonstration struct {
-	goalState int
-	initialStateDist []float64
-	actionDist []float64
-	nSample int //Number of trejectories
+type Feature struct {
+	N, M int
+	values []float64
 }
 
-func NewDemonstration(m *mdp.Model, goalState int, trajectories [][]int) *Demonstration {
-	nSample := len(trajectories)
-	initialStateDist := make([]float64, m.NumStates())
-	actionDist := make([]float64, m.NumActions())
-	for _, tr := range trajectories {
-		state, ok := m.StateOf[tr[0]]
-		if !ok { continue }
-		initialStateDist[state.Index()]++
-		fromState := tr[0]
-		for _, toState := range tr[1:] {
-			acition, ok := m.ActionByID(fromState, toState)
-			if ok { actionDist[acition.Index()]++ }
-			fromState = toState
-		}
+func NewFeature(N, M int) *Feature {
+	return &Feature{
+		N: N,
+		M: M,
+		values: make([]float64, N * M),
 	}
-	for i := range initialStateDist {
-		initialStateDist[i] /= float64(nSample)
-	}
-	for i := range actionDist {
-		actionDist[i] /= float64(nSample)
-	}
-	demo := &Demonstration{
-		goalState: goalState,
-		initialStateDist: initialStateDist,
-		actionDist: actionDist,
-		nSample: nSample,
-	}
-	return demo
 }
 
-type Trainer struct {
+func (f *Feature) Vector(actionIndex int) base.Vector {
+	return base.Vector(f.values[f.M * actionIndex: f.M * (actionIndex + 1)])
+}
+
+func (f *Feature) Element(i, j int) float64 {
+	return f.values[f.M * i + j]
+}
+
+func (f *Feature) SetElement(i, j int, v float64) {
+	f.values[f.M * i + j] = v
+}
+
+type LinearModel struct {
 	mdp *mdp.Model
-	features [][]float64
-	nFeature int
-	Theta []float64
+	Feature *Feature
+	Theta base.Vector
+	UniqueCost base.Vector
 }
 
-func NewTrainer(m *mdp.Model, features [][]float64, nFeature int) *Trainer {
-	theta := make([]float64, nFeature)
-	base.Vector(theta).Fill(1.0 / float64(nFeature))
-	return &Trainer{
+func NewLinearModel(m *mdp.Model, f *Feature, uniqueCostFlag bool) *LinearModel {
+	theta := base.Vector(make([]float64, f.M))
+	theta.Fill(1.0 / float64(f.M))
+
+	var uniqueCost base.Vector
+	if uniqueCostFlag {
+		uniqueCost = base.Vector(make([]float64, f.N))
+		uniqueCost.Fill(0.1 / float64(f.N))
+	} else {
+		uniqueCost = nil
+	}
+	return &LinearModel{
 		mdp: m,
-		features: features,
-		nFeature: nFeature,
+		Feature: f,
 		Theta: theta,
+		UniqueCost : uniqueCost,
 	}
 }
 
-func (t *Trainer) EvalActionDist(demo *Demonstration) float64 {
-	vi := mdp.NewValueIterator(t.mdp)
+func (l *LinearModel) EvalActionDist(demo *Demonstration) float64 {
+	vi := mdp.NewValueIterator(l.mdp)
 	vi.InitAbsorbingState()
-	vi.SetAbsorbingState(demo.goalState)
+	vi.SetAbsorbingState(demo.goalID)
 	vi.RunValueIteration()
 	vi.UpdatePolicy()
 	_, actionDist := vi.StateActionVisitation(demo.initialStateDist)
 	return base.CosineSimilarity(actionDist, demo.actionDist)
 }
 
-func (t *Trainer) ComputeFeatureExpectation(actionDist []float64) []float64 {
-	featureExpectation := make([]float64, t.nFeature)
+func (l *LinearModel) ComputeFeatureExpectation(actionDist []float64) []float64 {
+	featureExpectation := make([]float64, l.Feature.M)
 	for i, d := range actionDist {
 		for j := range featureExpectation {
-			featureExpectation[j] += d * t.features[i][j]
+			featureExpectation[j] += d * l.Feature.Element(i, j)
 		}
 	}
 	return featureExpectation
 }
 
-func (t *Trainer) Fit(demonstrations []*Demonstration, nEpoch, numCPU int, gamma float64) {
+func (l *LinearModel) Fit(demonstrations []*Demonstration, nEpoch, numCPU int, gamma float64) {
 	// theta := make([]float64, feature.n)
-	gradSum := make([]float64, t.nFeature)
+	gradSum := base.Vector(make([]float64, l.Feature.M))
+
+	var uniqueGradSum base.Vector
+	if l.UniqueCost != nil {
+		uniqueGradSum = base.Vector(make([]float64, l.mdp.NumActions()))
+	} else {
+		uniqueGradSum = nil
+	}
+	
 	gradMutex := &sync.Mutex{}
 	viGroup := make([]*mdp.ValueIterator, numCPU)
 	wg := sync.WaitGroup{}
 	for i := 0; i < numCPU; i++ {
-		viGroup[i] = mdp.NewValueIterator(t.mdp)
+		viGroup[i] = mdp.NewValueIterator(l.mdp)
 	}
 	gamma /= float64(numCPU)
-	// vi := NewValueIterator(t.mdp)
+	// vi := NewValueIterator(l.mdp)
 	for i := 0; i < nEpoch; i++ {
-		base.Vector(gradSum).Fill(0.0)
+		gradSum.Fill(0.0)
+		if uniqueGradSum != nil {
+			uniqueGradSum.Fill(0.0)
+		}		
 		for _, vi := range viGroup {
 			wg.Add(1)
 			demo := demonstrations[rand.Intn(len(demonstrations))]
 			go func(vi *mdp.ValueIterator, demo *Demonstration) {
 				defer wg.Done()
-				grad := t.ComputeFeatureExpectationDifference(vi, demo)
+				grad, uniqueCost := l.ComputeFeatureExpectationDifference(vi, demo)
 				gradMutex.Lock()
-				base.Vector(gradSum).Add(base.Vector(grad))
+				gradSum.Add(base.Vector(grad))
+				if uniqueGradSum != nil {
+					uniqueGradSum.Add(base.Vector(uniqueCost))
+				}
 				gradMutex.Unlock()	
 			}(vi, demo)
-			// base.Vector(gradSum).Add(base.Vector(grad))
 		}
 		wg.Wait()
 		// Update theta with exponentiated gradient ascent
-		EponentiatedGradientAscent(t.Theta, gradSum, gamma)
+		if l.UniqueCost != nil {
+			l.ExponentiatedGradientAscent(gradSum, gamma)
+		} else {
+			l.GradientAscent(gradSum, uniqueGradSum, gamma)
+		}
 		// Update mdp.cost with new theta
-		UpdateCost(t.mdp, t.features, t.Theta)
+		cost := l.ComputeCost()
+		l.mdp.UpdateReward(cost)
 		gamma *= gradDecay
-		// fmt.Printf("gamma : %.3f, grad : %.3f, theta : %v\n", gamma, gradSum, t.Theta)
+		// fmt.Printf("gamma : %.3f, grad : %.3f, theta : %v\n", gamma, gradSum, l.Theta)
 	}
 }
 
 
-func EponentiatedGradientAscent(theta, grad []float64, gamma float64) {
+func (l *LinearModel) ExponentiatedGradientAscent(grad []float64, gamma float64) {
+	for i, g := range grad {
+		l.Theta[i] *= math.Max(-gradClip, (math.Min(gradClip, math.Exp(-gamma * g))))
+	}
+	l.Theta.Normalize()
+}
+
+func (l *LinearModel) GradientAscent(grad []float64, uniqueGrad []float64,gamma float64) {
 	for i := range grad {
-		theta[i] *= math.Max(-gradClip, (math.Min(gradClip, math.Exp(-gamma * grad[i]))))
+		l.Theta[i] += -gamma * math.Max(-gradClip, (math.Min(gradClip, grad[i])))
 	}
-	base.Vector(theta).Normalize()
+	z := l.Theta.Sum()
+	for i := range l.Theta {
+		l.Theta[i] /= z
+	}
+	if uniqueGrad != nil {
+		for i, g := range uniqueGrad {
+			l.UniqueCost[i] += -gamma * math.Max(-gradClip, (math.Min(gradClip, g)))
+			l.UniqueCost[i] /= z
+		}
+	}
 }
 
-func UpdateCost(m *mdp.Model, features [][]float64, theta []float64) {
-	m.UpdateReward(
-		func(a *mdp.Action) float64 {
-			return -base.Vector(theta).Dot(base.Vector(features[a.Index()]))
-	})
-	// for i := 0; i < m.NumActions(); i++ {
-	// 	m.SetReward(i, -base.Vector(theta).Dot(base.Vector(features[i])))
-	// }
+func (l *LinearModel) ComputeCost() []float64 {
+	cost := make([]float64, l.mdp.NumActions())
+	for i := range cost {
+		cost[i] = -l.Theta.Dot(l.Feature.Vector(i))
+	}
+	if l.UniqueCost != nil {
+		for i := range cost {
+			cost[i] = math.Min(0, cost[i] - l.UniqueCost[i])
+		}
+	}
+	return cost
 }
 
-func (t *Trainer) ComputeFeatureExpectationDifference(vi *mdp.ValueIterator, demo *Demonstration) []float64 {
+func (l *LinearModel) ComputeFeatureExpectationDifference(vi *mdp.ValueIterator, demo *Demonstration) ([]float64, []float64) {
 	vi.InitAbsorbingState()
-	vi.SetAbsorbingState(demo.goalState)
+	vi.SetAbsorbingState(demo.goalID)
 	vi.RunValueIteration()
 	vi.UpdatePolicy()
 	_, actionDist := vi.StateActionVisitation(demo.initialStateDist)
-	featureExpectation := t.ComputeFeatureExpectation(actionDist)
-	expertFeatureExpectation := t.ComputeFeatureExpectation(demo.actionDist)
-	base.Vector(expertFeatureExpectation).Sub(base.Vector(featureExpectation))
-	return expertFeatureExpectation
+	featureExpectation := l.ComputeFeatureExpectation(actionDist)
+	expertFeatureExpectation := l.ComputeFeatureExpectation(demo.actionDist)
+	// base.Vector(expertFeatureExpectation).Sub(base.Vector(featureExpectation))
+	for i := range expertFeatureExpectation {
+		expertFeatureExpectation[i] -= featureExpectation[i]
+	}
+	if l.UniqueCost == nil {
+		return expertFeatureExpectation, nil
+	}
+	for i := range actionDist {
+		actionDist[i] = demo.actionDist[i] - actionDist[i]
+	}
+	return expertFeatureExpectation, actionDist 
 } 
